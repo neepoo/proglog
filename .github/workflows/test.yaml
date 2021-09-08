@@ -23,5 +23,11 @@ jobs:
       - name: Check out code into the Go module directory
         uses: actions/checkout@v2
 
+      - name: install cfssl
+        run: go get github.com/cloudflare/cfssl/cmd/...
+
       - name: Test
-        run: make test
+        run: |
+          make init
+          make gencert
+          make test
