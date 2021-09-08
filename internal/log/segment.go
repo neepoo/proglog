@@ -5,8 +5,9 @@ import (
 	"os"
 	"path"
 
-	api "github.com/neepoo/proglog/api/v1"
 	"google.golang.org/protobuf/proto"
+
+	api "github.com/neepoo/proglog/api/v1"
 )
 
 type segment struct {
@@ -54,7 +55,6 @@ func newSegment(dir string, baseOffset uint64, c Config) (*segment, error) {
 		s.nextOffset = baseOffset + uint64(off) + 1
 	}
 	return s, nil
-
 }
 
 func (s *segment) Append(record *api.Record) (offset uint64, err error) {
@@ -91,7 +91,6 @@ func (s *segment) Read(off uint64) (*api.Record, error) {
 	record := &api.Record{}
 	err = proto.Unmarshal(p, record)
 	return record, err
-
 }
 
 // IsMaxed 判断segment是否达到了最大尺寸
