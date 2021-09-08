@@ -28,6 +28,7 @@ jobs:
 
       - name: Test
         run: |
+          go mod tidy
           make init
           make gencert
           make test
