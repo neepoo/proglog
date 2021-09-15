@@ -2,22 +2,43 @@ package server
 
 import (
 	"context"
-	"github.com/neepoo/proglog/internal/auth"
-	"google.golang.org/grpc/codes"
+	"flag"
 	"io/ioutil"
 	"net"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
+	"go.opencensus.io/examples/exporter"
+	"go.uber.org/zap"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/status"
 
 	api "github.com/neepoo/proglog/api/v1"
+	"github.com/neepoo/proglog/internal/auth"
 	"github.com/neepoo/proglog/internal/config"
 	"github.com/neepoo/proglog/internal/log"
 )
+
+var (
+	debug             = flag.Bool("debug", false, "Enable observability for debugging.")
+	telemetryExporter *exporter.LogExporter
+)
+
+func TestMain(m *testing.M) {
+	flag.Parse()
+	if *debug {
+		logger, err := zap.NewDevelopment()
+		if err != nil {
+			panic(err)
+		}
+		zap.ReplaceGlobals(logger)
+	}
+	os.Exit(m.Run())
+}
 
 // setupTest(*testing.T, func(*Config))
 // is a helper function to set up each test
@@ -95,6 +116,27 @@ func setupTest(t *testing.T, fn func(config *Config)) (
 	if fn != nil {
 		fn(cfg)
 	}
+
+	// observer
+	if *debug {
+		metricsLogFile, err := ioutil.TempFile("", "metrics-*.log")
+		require.NoError(t, err)
+		t.Logf("metrics log file: %s", metricsLogFile.Name())
+
+		tracesLogFile, err := ioutil.TempFile("", "traces-*.log")
+		require.NoError(t, err)
+		t.Logf("traces log file: %s", tracesLogFile.Name())
+
+		telemetryExporter, err = exporter.NewLogExporter(exporter.Options{
+			ReportingInterval: time.Second,
+			MetricsLogFile:    metricsLogFile.Name(),
+			TracesLogFile:     tracesLogFile.Name(),
+		})
+		require.NoError(t, err)
+		err = telemetryExporter.Start()
+		require.NoError(t, err)
+	}
+
 	server, err := NewGRPCServer(cfg, grpc.Creds(serverCCreds))
 	require.NoError(t, err)
 	go func() {
@@ -108,6 +150,13 @@ func setupTest(t *testing.T, fn func(config *Config)) (
 		nobodyConn.Close()
 		// close listener
 		l.Close()
+		if telemetryExporter != nil {
+			// We sleep for 1.5 seconds to give the telemetry exporter enough time to
+			//flush its data to disk. Then we stop and close the exporter.
+			time.Sleep(1500 * time.Millisecond)
+			telemetryExporter.Stop()
+			telemetryExporter.Close()
+		}
 	}
 }
 func TestServer(t *testing.T) {
