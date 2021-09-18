@@ -1,10 +1,9 @@
-package agent
+package agent_test
 
 import (
 	"context"
 	"crypto/tls"
 	"fmt"
-	"google.golang.org/grpc/status"
 	"io/ioutil"
 	"os"
 	"testing"
@@ -14,9 +13,12 @@ import (
 	"github.com/travisjeffery/go-dynaport"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/status"
 
 	api "github.com/neepoo/proglog/api/v1"
+	"github.com/neepoo/proglog/internal/agent"
 	"github.com/neepoo/proglog/internal/config"
+	"github.com/neepoo/proglog/internal/loadbalance"
 )
 
 /*We’ll set up a cluster with three nodes. We’ll produce a record
@@ -48,7 +50,7 @@ func TestAgent(t *testing.T) {
 	require.NoError(t, err)
 
 	// 设置集群
-	var agents []*Agent
+	var agents []*agent.Agent
 	for i := 0; i < 3; i++ {
 		ports := dynaport.Get(2)
 		bindAddr := fmt.Sprintf("%s:%d", "127.0.0.1", ports[0])
@@ -65,8 +67,8 @@ func TestAgent(t *testing.T) {
 			)
 		}
 
-		agent, err := New(
-			Config{
+		agent, err := agent.New(
+			agent.Config{
 				ServerTLSConfig: serverTLSConfig,
 				PeerTLSConfig:   peerTLSConfig,
 				DataDir:         dataDir,
@@ -75,7 +77,7 @@ func TestAgent(t *testing.T) {
 				NodeName:        fmt.Sprintf("node-%d", i),
 				StartJoinAddrs:  startJoinAddrs,
 				ACLModeFile:     config.ACLModelFile,
-				AclPolicyFile:   config.ACLPolicyFile,
+				ACLPolicyFile:   config.ACLPolicyFile,
 				Bootstrap:       i == 0,
 			})
 		require.NoError(t, err)
@@ -92,10 +94,10 @@ func TestAgent(t *testing.T) {
 	// 等待服务之间彼此发现
 	time.Sleep(3 * time.Second)
 	/*
-	Now we check that Raft has replicated the record we produced to the
-	leader by consuming the record from a follower and that the replication
-	stops there
-	 */
+		Now we check that Raft has replicated the record we produced to the
+		leader by consuming the record from a follower and that the replication
+		stops there
+	*/
 	leaderClient := client(t, agents[0], peerTLSConfig)
 	produceResponse, err := leaderClient.Produce(
 		context.Background(),
@@ -104,13 +106,14 @@ func TestAgent(t *testing.T) {
 		}},
 	)
 	require.NoError(t, err)
+	// 等待复制完成
+	time.Sleep(3 * time.Second)
 
 	consumeResponse, err := leaderClient.Consume(context.Background(), &api.ConsumeRequest{Offset: produceResponse.Offset})
 	require.NoError(t, err)
 	require.Equal(t, consumeResponse.Record.Values, []byte("foo"))
 
-	// 等待复制完成
-	time.Sleep(3 * time.Second)
+
 	followerClient := client(t, agents[1], peerTLSConfig)
 	consumeResponse, err = followerClient.Consume(
 		context.Background(),
@@ -133,7 +136,7 @@ func TestAgent(t *testing.T) {
 
 func client(
 	t *testing.T,
-	agent *Agent,
+	agent *agent.Agent,
 	tlsConfig *tls.Config,
 ) api.LogClient {
 	tlsCreds := credentials.NewTLS(tlsConfig)
@@ -143,7 +146,9 @@ func client(
 	rpcAddr, err := agent.Config.RPCAddr()
 	require.NoError(t, err)
 	conn, err := grpc.Dial(
-		rpcAddr,
+		// specify our scheme in the URL so gRPC knows to
+		// use our resolver.
+		fmt.Sprintf("%s:///%s", loadbalance.Name, rpcAddr),
 		opts...,
 	)
 	require.NoError(t, err)

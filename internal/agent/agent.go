@@ -30,7 +30,7 @@ type Config struct {
 	NodeName        string
 	StartJoinAddrs  []string
 	ACLModeFile     string
-	AclPolicyFile   string
+	ACLPolicyFile   string
 	Bootstrap       bool
 }
 
@@ -103,11 +103,12 @@ func (a *Agent) setupLog() error {
 func (a *Agent) setupServer() error {
 	authorizer := auth.New(
 		a.Config.ACLModeFile,
-		a.Config.AclPolicyFile,
+		a.Config.ACLPolicyFile,
 	)
 	serverConfig := &server.Config{
 		CommitLog:  a.log,
 		Authorizer: authorizer,
+		GetServer:  a.log,
 	}
 
 	var opts []grpc.ServerOption
@@ -194,7 +195,7 @@ func (a *Agent) setupMux() error {
 }
 
 func (a *Agent) serve() error {
-	if err := a.mux.Serve(); err != nil{
+	if err := a.mux.Serve(); err != nil {
 		_ = a.Shutdown()
 		return err
 	}
