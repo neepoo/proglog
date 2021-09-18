@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"google.golang.org/grpc/status"
 	"io/ioutil"
 	"os"
 	"testing"
@@ -75,6 +76,7 @@ func TestAgent(t *testing.T) {
 				StartJoinAddrs:  startJoinAddrs,
 				ACLModeFile:     config.ACLModelFile,
 				AclPolicyFile:   config.ACLPolicyFile,
+				Bootstrap:       i == 0,
 			})
 		require.NoError(t, err)
 		agents = append(agents, agent)
@@ -89,8 +91,11 @@ func TestAgent(t *testing.T) {
 	}()
 	// 等待服务之间彼此发现
 	time.Sleep(3 * time.Second)
-
-	// master or leader node?
+	/*
+	Now we check that Raft has replicated the record we produced to the
+	leader by consuming the record from a follower and that the replication
+	stops there
+	 */
 	leaderClient := client(t, agents[0], peerTLSConfig)
 	produceResponse, err := leaderClient.Produce(
 		context.Background(),
@@ -115,6 +120,15 @@ func TestAgent(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.Equal(t, consumeResponse.Record.Values, []byte("foo"))
+	consumeResponse, err = leaderClient.Consume(context.Background(), &api.ConsumeRequest{
+		Offset: produceResponse.Offset + 1,
+	})
+	require.Nil(t, consumeResponse)
+	require.Error(t, err)
+	got := status.Code(err)
+	want := status.Code(api.ErrOffsetOutOfRange{}.GRPCStatus().Err())
+	require.Equal(t, got, want)
+
 }
 
 func client(
