@@ -1,16 +1,20 @@
 package agent
 
 import (
+	"bytes"
 	"crypto/tls"
 	"fmt"
+	"github.com/hashicorp/raft"
+	"io"
 	"net"
 	"sync"
+	"time"
 
+	"github.com/soheilhy/cmux"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 
-	api "github.com/neepoo/proglog/api/v1"
 	"github.com/neepoo/proglog/internal/auth"
 	"github.com/neepoo/proglog/internal/discovery"
 	"github.com/neepoo/proglog/internal/log"
@@ -27,6 +31,7 @@ type Config struct {
 	StartJoinAddrs  []string
 	ACLModeFile     string
 	AclPolicyFile   string
+	Bootstrap       bool
 }
 
 func (c Config) RPCAddr() (string, error) {
@@ -40,10 +45,10 @@ func (c Config) RPCAddr() (string, error) {
 type Agent struct {
 	Config
 
-	log        *log.Log              // storage
+	mux        cmux.CMux
+	log        *log.DistributedLog   // storage
 	server     *grpc.Server          // communication
 	membership *discovery.Membership // member manager
-	replicator *log.Replicator       // sync data
 
 	shutdown     bool
 	shutdowns    chan struct{}
@@ -59,12 +64,39 @@ func (a *Agent) setupLogger() error {
 	return nil
 }
 
+// update setupLog to configure the rule to match Raft and create the
+//	distributed log
 func (a *Agent) setupLog() error {
-	var err error
-	a.log, err = log.NewLog(
-		a.Config.DataDir,
-		log.Config{},
+	raftLn := a.mux.Match(func(reader io.Reader) bool {
+		b := make([]byte, 1)
+		if _, err := reader.Read(b); err != nil {
+			return false
+		}
+		return bytes.Compare(b, []byte{byte(log.RaftRPC)}) == 0
+	})
+	// If the mux matches this rule, it will pass the connection to the raftLn
+	//listener for Raft to handle the connection
+	logConfig := log.Config{}
+	logConfig.Raft.StreamLayer = log.NewStreamLayer(
+		raftLn,
+		a.Config.ServerTLSConfig,
+		a.Config.PeerTLSConfig,
 	)
+	logConfig.Raft.LocalID = raft.ServerID(a.Config.NodeName)
+	logConfig.Raft.Bootstrap = a.Config.Bootstrap
+	var err error
+
+	a.log, err = log.NewDistributedLog(
+		a.Config.DataDir,
+		logConfig,
+	)
+	if err != nil {
+		return err
+	}
+
+	if a.Config.Bootstrap {
+		err = a.log.WaitForLeader(3 * time.Second)
+	}
 	return err
 }
 
@@ -91,17 +123,12 @@ func (a *Agent) setupServer() error {
 		return err
 	}
 
-	rpcAddr, err := a.RPCAddr()
-	if err != nil {
-		return err
-	}
-	ln, err := net.Listen("tcp", rpcAddr)
-	if err != nil {
-		return err
-	}
-
+	//We use cmux.Any because it
+	//matches any connections. Then we tell our gRPC server to serve on
+	//the multiplexed listener.
+	grpcLn := a.mux.Match(cmux.Any())
 	go func() {
-		if err := a.server.Serve(ln); err != nil {
+		if err := a.server.Serve(grpcLn); err != nil {
 			_ = a.Shutdown()
 		}
 	}()
@@ -123,7 +150,6 @@ func (a *Agent) Shutdown() error {
 		// 离开集群
 		a.membership.Leave,
 		// 停止复制数据
-		a.replicator.Close,
 		func() error {
 			// 关闭rpc server
 			a.server.GracefulStop()
@@ -142,40 +168,37 @@ func (a *Agent) Shutdown() error {
 }
 
 func (a *Agent) setupMembership() error {
-	rpcAddr, err := a.RPCAddr()
+	rpcAddr, err := a.Config.RPCAddr()
 	if err != nil {
 		return err
 	}
-	var opts []grpc.DialOption
-	if a.Config.PeerTLSConfig != nil {
-		opts = append(opts,
-			grpc.WithTransportCredentials(
-				credentials.NewTLS(a.Config.PeerTLSConfig),
-			),
-		)
-	}
-	conn, err := grpc.Dial(rpcAddr, opts...)
-	if err != nil {
-		return err
-	}
-
-	client := api.NewLogClient(conn)
-	a.replicator = &log.Replicator{
-		DialOptions: opts,
-		LocalServer: client,
-	}
-
-	a.membership, err = discovery.New(
-		a.replicator,
-		discovery.Config{
-			NodeName:       a.Config.NodeName,
-			BindAddr:       a.Config.BindAddr,
-			Tags:           map[string]string{"rpc_addr": rpcAddr},
-			StartJoinAddrs: a.Config.StartJoinAddrs,
-		},
-	)
-
+	a.membership, err = discovery.New(a.log, discovery.Config{
+		NodeName:       a.Config.NodeName,
+		BindAddr:       a.Config.BindAddr,
+		Tags:           map[string]string{"rpc_addr": rpcAddr},
+		StartJoinAddrs: a.Config.StartJoinAddrs,
+	})
 	return err
+}
+
+// setupMux creates a listener on our RPC address that’ll accept both Raft
+// and gRPC connections and then creates the mux with the listener.
+func (a *Agent) setupMux() error {
+	rpcAddr := fmt.Sprintf(":%d", a.Config.RPCPort)
+	in, err := net.Listen("tcp", rpcAddr)
+	if err != nil {
+		return err
+	}
+	a.mux = cmux.New(in)
+	return nil
+}
+
+func (a *Agent) serve() error {
+	if err := a.mux.Serve(); err != nil{
+		_ = a.Shutdown()
+		return err
+	}
+	return nil
 }
 
 func New(config Config) (*Agent, error) {
@@ -186,6 +209,7 @@ func New(config Config) (*Agent, error) {
 
 	setup := []func() error{
 		a.setupLogger,
+		a.setupMux,
 		a.setupLog,
 		a.setupServer,
 		a.setupMembership,
@@ -196,5 +220,6 @@ func New(config Config) (*Agent, error) {
 			return nil, err
 		}
 	}
+	go a.serve()
 	return a, nil
 }

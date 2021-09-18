@@ -19,6 +19,7 @@ require (
 	github.com/mattn/go-colorable v0.1.6 // indirect
 	github.com/mitchellh/cli v1.1.0 // indirect
 	github.com/posener/complete v1.2.3 // indirect
+	github.com/soheilhy/cmux v0.1.5 // indirect
 	github.com/stretchr/testify v1.7.0 // indirect
 	github.com/travisjeffery/go-dynaport v1.0.0 // indirect
 	github.com/tysontate/gommap v0.0.0-20210506040252-ef38c88b18e1 // indirect
