@@ -37,9 +37,14 @@ type Authorizer interface {
 	Authorize(subject, object, action string) error
 }
 
+type GetServerer interface {
+	GetServers() ([]*api.Server, error)
+}
+
 type Config struct {
 	CommitLog  CommitLog
 	Authorizer Authorizer
+	GetServer  GetServerer
 }
 
 func NewGRPCServer(config *Config, opts ...grpc.ServerOption) (*grpc.Server, error) {
@@ -56,24 +61,24 @@ func NewGRPCServer(config *Config, opts ...grpc.ServerOption) (*grpc.Server, err
 	}
 	//  configure how OpenCensus collects metrics and traces:
 	trace.ApplyConfig(trace.Config{
-		DefaultSampler:             trace.AlwaysSample(),
+		DefaultSampler: trace.AlwaysSample(),
 	})
 	err := view.Register(ocgrpc.DefaultServerViews...)
-	if err != nil{
+	if err != nil {
 		return nil, err
 	}
 	/*
-	These lines configure gRPC to apply the Zap interceptors that log the
-	gRPC calls and attach OpenCensus as the server’s stat handler so that
-	OpenCensus can record stats on the server’s request handling.
+		These lines configure gRPC to apply the Zap interceptors that log the
+		gRPC calls and attach OpenCensus as the server’s stat handler so that
+		OpenCensus can record stats on the server’s request handling.
 	*/
 	opts = append(opts, grpc.StreamInterceptor(
 		grpc_middleware.ChainStreamServer(
-			grpc_ctxtags.StreamServerInterceptor(),  // 设置请求标签
+			grpc_ctxtags.StreamServerInterceptor(), // 设置请求标签
 			grpc_zap.StreamServerInterceptor(logger, zapOpts...),
 			grpc_auth.StreamServerInterceptor(authenticate),
 		)), grpc.UnaryInterceptor(grpc_middleware.ChainUnaryServer(
-		grpc_ctxtags.UnaryServerInterceptor(),  // 设置请求标签
+		grpc_ctxtags.UnaryServerInterceptor(), // 设置请求标签
 		grpc_zap.UnaryServerInterceptor(logger, zapOpts...),
 		grpc_auth.UnaryServerInterceptor(authenticate),
 	)), grpc.StatsHandler(&ocgrpc.ServerHandler{}))
@@ -205,4 +210,14 @@ func (s *grpcServer) ConsumeStream(
 			req.Offset++
 		}
 	}
+}
+
+func (s *grpcServer) GetServers(ctx context.Context, req *api.GetServersRequest) (*api.GetServersResponse, error) {
+	servers, err := s.GetServer.GetServers()
+	if err != nil {
+		return nil, err
+	}
+	return &api.GetServersResponse{
+		Servers: servers,
+	}, nil
 }
